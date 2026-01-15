@@ -1,0 +1,25 @@
+# Data files (local development only)
+habits_data.json
+
+# Streamlit secrets (NEVER commit this!)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+.env
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
