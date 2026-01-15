@@ -58,12 +58,16 @@ def user_exists(supabase, username):
 def load_habits(supabase, username):
     """Load habits list from Supabase for a specific user."""
     response = supabase.table("habits").select("*").eq("username", username).order("created_at").execute()
-    return [row["name"] for row in response.data]
+    return response.data
 
 
-def save_habit(supabase, username, habit_name):
+def save_habit(supabase, username, habit_name, habit_type):
     """Add a new habit to Supabase."""
-    supabase.table("habits").insert({"name": habit_name, "username": username}).execute()
+    supabase.table("habits").insert({
+        "name": habit_name,
+        "username": username,
+        "habit_type": habit_type
+    }).execute()
 
 
 def remove_habit(supabase, username, habit_name):
@@ -78,41 +82,98 @@ def load_completions(supabase, username):
 
     completions = {}
     for row in response.data:
-        date_str = row["date"]
+        period_key = row["period_key"]
         habit_name = row["habit_name"]
-        if date_str not in completions:
-            completions[date_str] = []
-        completions[date_str].append(habit_name)
+        if period_key not in completions:
+            completions[period_key] = []
+        completions[period_key].append(habit_name)
 
     return completions
 
 
-def toggle_completion(supabase, username, date_str, habit_name, is_completed):
-    """Toggle completion status for a habit on a specific date."""
+def toggle_completion(supabase, username, period_key, habit_name, is_completed):
+    """Toggle completion status for a habit on a specific period."""
     if is_completed:
         supabase.table("completions").insert({
-            "date": date_str,
+            "period_key": period_key,
             "habit_name": habit_name,
             "username": username
         }).execute()
     else:
-        supabase.table("completions").delete().eq("date", date_str).eq("habit_name", habit_name).eq("username", username).execute()
+        supabase.table("completions").delete().eq("period_key", period_key).eq("habit_name", habit_name).eq("username", username).execute()
 
 
-def get_streak(habit_name, completions):
-    """Calculate current streak for a habit."""
+def get_period_key(habit_type, date=None):
+    """Get the period key for a habit type."""
+    if date is None:
+        date = datetime.now()
+
+    if habit_type == "daily":
+        return date.strftime("%Y-%m-%d")
+    elif habit_type == "weekly":
+        # Use ISO week number (Monday as start of week)
+        return date.strftime("%Y-W%W")
+    elif habit_type == "monthly":
+        return date.strftime("%Y-%m")
+    return date.strftime("%Y-%m-%d")
+
+
+def get_period_label(habit_type):
+    """Get a human-readable label for the current period."""
+    now = datetime.now()
+
+    if habit_type == "daily":
+        return now.strftime("%A, %B %d, %Y")
+    elif habit_type == "weekly":
+        # Get start and end of current week
+        start_of_week = now - timedelta(days=now.weekday())
+        end_of_week = start_of_week + timedelta(days=6)
+        return f"Week of {start_of_week.strftime('%b %d')} - {end_of_week.strftime('%b %d, %Y')}"
+    elif habit_type == "monthly":
+        return now.strftime("%B %Y")
+    return ""
+
+
+def get_streak(habit_name, habit_type, completions):
+    """Calculate current streak for a habit based on its type."""
     streak = 0
-    check_date = datetime.now().date()
+    check_date = datetime.now()
 
     while True:
-        date_str = check_date.strftime("%Y-%m-%d")
-        if date_str in completions and habit_name in completions[date_str]:
+        period_key = get_period_key(habit_type, check_date)
+
+        if period_key in completions and habit_name in completions[period_key]:
             streak += 1
-            check_date -= timedelta(days=1)
+            # Move to previous period
+            if habit_type == "daily":
+                check_date -= timedelta(days=1)
+            elif habit_type == "weekly":
+                check_date -= timedelta(weeks=1)
+            elif habit_type == "monthly":
+                # Move to previous month
+                if check_date.month == 1:
+                    check_date = check_date.replace(year=check_date.year - 1, month=12)
+                else:
+                    check_date = check_date.replace(month=check_date.month - 1)
         else:
             break
 
+        # Safety limit
+        if streak > 365:
+            break
+
     return streak
+
+
+def get_streak_unit(habit_type):
+    """Get the unit for streak display."""
+    if habit_type == "daily":
+        return "day"
+    elif habit_type == "weekly":
+        return "week"
+    elif habit_type == "monthly":
+        return "month"
+    return "day"
 
 
 def show_login_page(supabase):
@@ -165,6 +226,64 @@ def show_login_page(supabase):
                     st.error("Failed to create account. Please try again.")
 
 
+def render_habit_section(supabase, username, habits, completions, habit_type, icon, title):
+    """Render a section for a specific habit type."""
+    type_habits = [h for h in habits if h.get("habit_type", "daily") == habit_type]
+
+    if not type_habits:
+        return
+
+    period_key = get_period_key(habit_type)
+    period_label = get_period_label(habit_type)
+    streak_unit = get_streak_unit(habit_type)
+
+    st.markdown(f"### {icon} {title}")
+    st.caption(f"📅 {period_label}")
+
+    cols = st.columns([3, 1, 1])
+    cols[0].markdown("**Habit**")
+    cols[1].markdown("**Status**")
+    cols[2].markdown("**Streak**")
+
+    for habit in type_habits:
+        habit_name = habit["name"]
+        cols = st.columns([3, 1, 1])
+
+        with cols[0]:
+            st.markdown(f"**{habit_name}**")
+
+        with cols[1]:
+            is_completed = habit_name in completions.get(period_key, [])
+            checkbox_value = st.checkbox(
+                "Done",
+                value=is_completed,
+                key=f"check_{habit_type}_{habit_name}",
+                label_visibility="collapsed"
+            )
+
+            if checkbox_value != is_completed:
+                toggle_completion(supabase, username, period_key, habit_name, checkbox_value)
+                if checkbox_value:
+                    completions.setdefault(period_key, []).append(habit_name)
+                else:
+                    completions[period_key].remove(habit_name)
+
+        with cols[2]:
+            streak = get_streak(habit_name, habit_type, completions)
+            if streak > 0:
+                st.markdown(f"🔥 {streak} {streak_unit}{'s' if streak > 1 else ''}")
+            else:
+                st.markdown("—")
+
+    # Progress for this type
+    completed_count = sum(1 for h in type_habits if h["name"] in completions.get(period_key, []))
+    total_count = len(type_habits)
+    progress = completed_count / total_count if total_count > 0 else 0
+    st.progress(progress)
+    st.caption(f"{completed_count}/{total_count} completed")
+    st.divider()
+
+
 def show_main_app(supabase, username):
     """Display the main habit tracker app."""
     st.set_page_config(page_title="Daily Habit Tracker", page_icon="✅", layout="wide")
@@ -172,7 +291,7 @@ def show_main_app(supabase, username):
     # Header with logout
     col1, col2 = st.columns([6, 1])
     with col1:
-        st.title("📋 Daily Habit Tracker")
+        st.title("📋 Habit Tracker")
     with col2:
         st.write("")
         if st.button("Logout"):
@@ -189,13 +308,19 @@ def show_main_app(supabase, username):
     with st.sidebar:
         st.header("➕ Add New Habit")
         new_habit = st.text_input("Habit name", placeholder="e.g., Exercise, Read, Meditate")
+        habit_type = st.selectbox(
+            "Frequency",
+            options=["daily", "weekly", "monthly"],
+            format_func=lambda x: {"daily": "📅 Daily", "weekly": "📆 Weekly", "monthly": "🗓️ Monthly"}[x]
+        )
 
         if st.button("Add Habit", type="primary"):
-            if new_habit and new_habit not in habits:
-                save_habit(supabase, username, new_habit)
+            existing_names = [h["name"] for h in habits]
+            if new_habit and new_habit not in existing_names:
+                save_habit(supabase, username, new_habit, habit_type)
                 st.success(f"Added '{new_habit}'!")
                 st.rerun()
-            elif new_habit in habits:
+            elif new_habit in existing_names:
                 st.warning("Habit already exists!")
             else:
                 st.warning("Please enter a habit name.")
@@ -204,85 +329,45 @@ def show_main_app(supabase, username):
 
         if habits:
             st.header("🗑️ Remove Habit")
-            habit_to_remove = st.selectbox("Select habit to remove", habits)
+            habit_names = [h["name"] for h in habits]
+            habit_to_remove = st.selectbox("Select habit to remove", habit_names)
             if st.button("Remove", type="secondary"):
                 remove_habit(supabase, username, habit_to_remove)
                 st.success(f"Removed '{habit_to_remove}'!")
                 st.rerun()
 
     # Main content area
-    today = datetime.now().strftime("%Y-%m-%d")
-    st.subheader(f"📅 Today: {datetime.now().strftime('%A, %B %d, %Y')}")
-
     if not habits:
         st.info("👈 Add your first habit using the sidebar!")
     else:
-        if today not in completions:
-            completions[today] = []
+        # Render each habit type section
+        render_habit_section(supabase, username, habits, completions, "daily", "📅", "Daily Habits")
+        render_habit_section(supabase, username, habits, completions, "weekly", "📆", "Weekly Habits")
+        render_habit_section(supabase, username, habits, completions, "monthly", "🗓️", "Monthly Habits")
 
-        st.markdown("### Today's Habits")
+        # Overall stats
+        st.markdown("### 📊 Overview")
 
-        cols = st.columns([3, 1, 1])
-        cols[0].markdown("**Habit**")
-        cols[1].markdown("**Status**")
-        cols[2].markdown("**Streak**")
+        col1, col2, col3 = st.columns(3)
 
-        for habit in habits:
-            cols = st.columns([3, 1, 1])
+        daily_habits = [h for h in habits if h.get("habit_type", "daily") == "daily"]
+        weekly_habits = [h for h in habits if h.get("habit_type") == "weekly"]
+        monthly_habits = [h for h in habits if h.get("habit_type") == "monthly"]
 
-            with cols[0]:
-                st.markdown(f"**{habit}**")
+        with col1:
+            daily_key = get_period_key("daily")
+            daily_done = sum(1 for h in daily_habits if h["name"] in completions.get(daily_key, []))
+            st.metric("Daily", f"{daily_done}/{len(daily_habits)}")
 
-            with cols[1]:
-                is_completed = habit in completions.get(today, [])
-                checkbox_value = st.checkbox(
-                    "Done",
-                    value=is_completed,
-                    key=f"check_{habit}",
-                    label_visibility="collapsed"
-                )
+        with col2:
+            weekly_key = get_period_key("weekly")
+            weekly_done = sum(1 for h in weekly_habits if h["name"] in completions.get(weekly_key, []))
+            st.metric("Weekly", f"{weekly_done}/{len(weekly_habits)}")
 
-                if checkbox_value != is_completed:
-                    toggle_completion(supabase, username, today, habit, checkbox_value)
-                    if checkbox_value:
-                        completions.setdefault(today, []).append(habit)
-                    else:
-                        completions[today].remove(habit)
-
-            with cols[2]:
-                streak = get_streak(habit, completions)
-                if streak > 0:
-                    st.markdown(f"🔥 {streak} day{'s' if streak > 1 else ''}")
-                else:
-                    st.markdown("—")
-
-        # Progress summary
-        st.divider()
-        completed_today = len(completions.get(today, []))
-        total_habits = len(habits)
-        progress = completed_today / total_habits if total_habits > 0 else 0
-
-        st.markdown("### Today's Progress")
-        st.progress(progress)
-        st.markdown(f"**{completed_today}/{total_habits}** habits completed")
-
-        # Weekly overview
-        st.divider()
-        st.markdown("### 📊 Last 7 Days")
-
-        week_cols = st.columns(7)
-        for i in range(6, -1, -1):
-            date = datetime.now() - timedelta(days=i)
-            date_str = date.strftime("%Y-%m-%d")
-            day_name = date.strftime("%a")
-
-            with week_cols[6-i]:
-                completed = len(completions.get(date_str, []))
-                st.metric(
-                    label=day_name,
-                    value=f"{completed}/{total_habits}",
-                    delta=None
-                )
+        with col3:
+            monthly_key = get_period_key("monthly")
+            monthly_done = sum(1 for h in monthly_habits if h["name"] in completions.get(monthly_key, []))
+            st.metric("Monthly", f"{monthly_done}/{len(monthly_habits)}")
 
 
 def main():

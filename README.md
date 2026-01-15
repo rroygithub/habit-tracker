@@ -1,15 +1,15 @@
-# Daily Habit Tracker
+# Habit Tracker
 
-A simple, personal habit tracking web application built with Streamlit and Supabase.
+A personal habit tracking web application built with Streamlit and Supabase.
 
 ## Features
 
 - **User Authentication**: Secure login with username/password
 - **Access Code Registration**: New accounts require an access code (invite-only)
-- **Daily Habit Tracking**: Check off habits as you complete them
-- **Streak Tracking**: See your consecutive day streaks for each habit
-- **Weekly Overview**: Visual summary of the last 7 days
-- **Progress Bar**: Track daily completion percentage
+- **Multiple Habit Types**: Track daily, weekly, and monthly habits
+- **Streak Tracking**: See consecutive streaks for each habit (days, weeks, or months)
+- **Progress Tracking**: Visual progress bars for each habit category
+- **Overview Dashboard**: See completion stats across all habit types
 
 ## Tech Stack
 
@@ -46,23 +46,24 @@ CREATE TABLE access_codes (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Habits table (per user)
+-- Habits table (per user, with type)
 CREATE TABLE habits (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+    habit_type TEXT NOT NULL DEFAULT 'daily',  -- 'daily', 'weekly', or 'monthly'
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     UNIQUE(name, username)
 );
 
--- Completions table (per user)
+-- Completions table (per user, with period_key for flexible tracking)
 CREATE TABLE completions (
     id SERIAL PRIMARY KEY,
-    date DATE NOT NULL,
+    period_key TEXT NOT NULL,  -- '2024-01-15' for daily, '2024-W03' for weekly, '2024-01' for monthly
     habit_name TEXT NOT NULL,
     username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(date, habit_name, username)
+    UNIQUE(period_key, habit_name, username)
 );
 
 -- Enable Row Level Security
@@ -126,6 +127,14 @@ streamlit run habit_tracker.py
 4. Set main file to `habit_tracker.py`
 5. Add your Supabase secrets in Advanced Settings
 6. Deploy!
+
+## Habit Types
+
+| Type | Tracking Period | Streak Unit | Example |
+|------|-----------------|-------------|---------|
+| Daily | Each day | Days | Exercise, Meditate |
+| Weekly | Each week (Mon-Sun) | Weeks | Meal prep, Deep clean |
+| Monthly | Each month | Months | Budget review, Doctor visit |
 
 ## Managing Access Codes
 
