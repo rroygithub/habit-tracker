@@ -1,7 +1,37 @@
 import streamlit as st
 from supabase import create_client
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import hashlib
+
+
+# Common timezone choices
+TIMEZONE_OPTIONS = [
+    "America/Vancouver",
+    "America/Edmonton",
+    "America/Winnipeg",
+    "America/Toronto",
+    "America/Halifax",
+    "America/St_Johns",
+    "America/New_York",
+    "America/Chicago",
+    "America/Denver",
+    "America/Los_Angeles",
+    "America/Phoenix",
+    "America/Anchorage",
+    "Pacific/Honolulu",
+    "Europe/London",
+    "Europe/Paris",
+    "Europe/Berlin",
+    "Asia/Tokyo",
+    "Asia/Shanghai",
+    "Asia/Kolkata",
+    "Australia/Sydney",
+    "Pacific/Auckland",
+    "UTC",
+]
+
+DEFAULT_TIMEZONE = "America/Vancouver"
 
 
 # Mobile-friendly CSS
@@ -83,7 +113,29 @@ def verify_user(supabase, username, password):
     """Verify user credentials."""
     password_hash = hash_password(password)
     response = supabase.table("users").select("*").eq("username", username).eq("password_hash", password_hash).execute()
-    return len(response.data) > 0
+    if len(response.data) > 0:
+        # Load timezone preference into session state
+        tz = response.data[0].get("timezone") or DEFAULT_TIMEZONE
+        st.session_state["timezone"] = tz
+        return True
+    return False
+
+
+def get_user_timezone():
+    """Get the current user's timezone as a ZoneInfo object."""
+    tz_name = st.session_state.get("timezone", DEFAULT_TIMEZONE)
+    return ZoneInfo(tz_name)
+
+
+def now_in_user_tz():
+    """Get the current datetime in the user's timezone."""
+    return datetime.now(get_user_timezone())
+
+
+def save_user_timezone(supabase, username, timezone):
+    """Save the user's timezone preference."""
+    supabase.table("users").update({"timezone": timezone}).eq("username", username).execute()
+    st.session_state["timezone"] = timezone
 
 
 def user_exists(supabase, username):
@@ -98,13 +150,16 @@ def load_habits(supabase, username):
     return response.data
 
 
-def save_habit(supabase, username, habit_name, habit_type):
+def save_habit(supabase, username, habit_name, habit_type, target_month=None):
     """Add a new habit to Supabase."""
-    supabase.table("habits").insert({
+    record = {
         "name": habit_name,
         "username": username,
         "habit_type": habit_type
-    }).execute()
+    }
+    if habit_type == "monthly" and target_month:
+        record["target_month"] = target_month
+    supabase.table("habits").insert(record).execute()
 
 
 def remove_habit(supabase, username, habit_name):
@@ -140,10 +195,13 @@ def toggle_completion(supabase, username, period_key, habit_name, is_completed):
         supabase.table("completions").delete().eq("period_key", period_key).eq("habit_name", habit_name).eq("username", username).execute()
 
 
-def get_period_key(habit_type, date=None):
+def get_period_key(habit_type, date=None, target_month=None):
     """Get the period key for a habit type."""
+    if habit_type == "monthly" and target_month:
+        return target_month
+
     if date is None:
-        date = datetime.now()
+        date = now_in_user_tz()
 
     if habit_type == "daily":
         return date.strftime("%Y-%m-%d")
@@ -156,7 +214,7 @@ def get_period_key(habit_type, date=None):
 
 def get_period_label(habit_type):
     """Get a human-readable label for the current period."""
-    now = datetime.now()
+    now = now_in_user_tz()
 
     if habit_type == "daily":
         return now.strftime("%a, %b %d")
@@ -172,7 +230,7 @@ def get_period_label(habit_type):
 def get_streak(habit_name, habit_type, completions):
     """Calculate current streak for a habit based on its type."""
     streak = 0
-    check_date = datetime.now()
+    check_date = now_in_user_tz()
 
     while True:
         period_key = get_period_key(habit_type, check_date)
@@ -256,11 +314,15 @@ def render_habit_card(supabase, username, habit, completions):
     """Render a single habit as a mobile-friendly card."""
     habit_name = habit["name"]
     habit_type = habit.get("habit_type", "daily")
-    period_key = get_period_key(habit_type)
+    target_month = habit.get("target_month")
+    period_key = get_period_key(habit_type, target_month=target_month)
 
     is_completed = habit_name in completions.get(period_key, [])
-    streak = get_streak(habit_name, habit_type, completions)
-    streak_unit = get_streak_unit(habit_type, short=True)
+    is_monthly = habit_type == "monthly"
+
+    if not is_monthly:
+        streak = get_streak(habit_name, habit_type, completions)
+        streak_unit = get_streak_unit(habit_type, short=True)
 
     # Use columns for compact layout: checkbox | name | streak
     col1, col2, col3 = st.columns([1, 5, 2])
@@ -287,15 +349,79 @@ def render_habit_card(supabase, username, habit, completions):
             st.markdown(f"**{habit_name}**")
 
     with col3:
-        if streak > 0:
+        if is_monthly:
+            st.markdown("")
+        elif streak > 0:
             st.markdown(f"🔥 {streak}{streak_unit}")
         else:
             st.markdown("")
 
 
+def generate_month_options(count=13):
+    """Generate a list of month options centered around the current month."""
+    now = now_in_user_tz()
+    options = []
+    # Start 2 months in the past
+    for i in range(-2, count - 2):
+        year = now.year
+        month = now.month + i
+        while month > 12:
+            month -= 12
+            year += 1
+        while month < 1:
+            month += 12
+            year -= 1
+        dt = now.replace(year=year, month=month, day=1)
+        options.append((dt.strftime("%Y-%m"), dt.strftime("%B %Y")))
+    return options
+
+
 def render_habit_section(supabase, username, habits, completions, habit_type, icon, title):
     """Render a section for a specific habit type."""
     type_habits = [h for h in habits if h.get("habit_type", "daily") == habit_type]
+
+    if habit_type == "monthly":
+        # Monthly habits: show month selector and filter by selected month
+        all_monthly = [h for h in habits if h.get("habit_type") == "monthly"]
+        if not all_monthly:
+            return False
+
+        month_options = generate_month_options()
+        month_values = [m[0] for m in month_options]
+        month_labels = [m[1] for m in month_options]
+
+        now = now_in_user_tz()
+        current_month = now.strftime("%Y-%m")
+        default_index = month_values.index(current_month) if current_month in month_values else 0
+
+        with st.expander(f"{icon} {title}", expanded=True):
+            selected_month = st.selectbox(
+                "Month",
+                options=month_values,
+                format_func=lambda x: month_labels[month_values.index(x)],
+                index=default_index,
+                key="monthly_month_selector"
+            )
+
+            filtered_habits = [h for h in all_monthly if h.get("target_month") == selected_month]
+
+            if not filtered_habits:
+                st.caption("No tasks for this month.")
+            else:
+                for habit in filtered_habits:
+                    render_habit_card(supabase, username, habit, completions)
+
+                # Progress for filtered habits
+                completed_count = sum(
+                    1 for h in filtered_habits
+                    if h["name"] in completions.get(h.get("target_month", ""), [])
+                )
+                total_count = len(filtered_habits)
+
+                st.progress(completed_count / total_count if total_count > 0 else 0)
+                st.caption(f"{completed_count}/{total_count} done")
+
+        return True
 
     if not type_habits:
         return False
@@ -351,10 +477,26 @@ def show_main_app(supabase, username):
             key="new_habit_type"
         )
 
+        target_month = None
+        if habit_type == "monthly":
+            month_options = generate_month_options()
+            month_values = [m[0] for m in month_options]
+            month_labels = [m[1] for m in month_options]
+            now = now_in_user_tz()
+            current_month = now.strftime("%Y-%m")
+            default_index = month_values.index(current_month) if current_month in month_values else 0
+            target_month = st.selectbox(
+                "Target Month",
+                options=month_values,
+                format_func=lambda x: month_labels[month_values.index(x)],
+                index=default_index,
+                key="new_habit_target_month"
+            )
+
         if st.button("Add", type="primary", key="add_habit_btn"):
             existing_names = [h["name"] for h in habits]
             if new_habit and new_habit not in existing_names:
-                save_habit(supabase, username, new_habit, habit_type)
+                save_habit(supabase, username, new_habit, habit_type, target_month=target_month)
                 st.success(f"Added '{new_habit}'!")
                 st.rerun()
             elif new_habit in existing_names:
@@ -389,14 +531,33 @@ def show_main_app(supabase, username):
             weekly_done = sum(1 for h in weekly_habits if h["name"] in completions.get(weekly_key, []))
             metrics.append(("Weekly", f"{weekly_done}/{len(weekly_habits)}"))
         if monthly_habits:
-            monthly_key = get_period_key("monthly")
-            monthly_done = sum(1 for h in monthly_habits if h["name"] in completions.get(monthly_key, []))
-            metrics.append(("Monthly", f"{monthly_done}/{len(monthly_habits)}"))
+            current_month = now_in_user_tz().strftime("%Y-%m")
+            current_month_habits = [h for h in monthly_habits if h.get("target_month") == current_month]
+            if current_month_habits:
+                monthly_done = sum(
+                    1 for h in current_month_habits
+                    if h["name"] in completions.get(h.get("target_month", ""), [])
+                )
+                metrics.append(("Monthly", f"{monthly_done}/{len(current_month_habits)}"))
 
         if metrics:
             cols = st.columns(len(metrics))
             for i, (label, value) in enumerate(metrics):
                 cols[i].metric(label, value)
+
+        # Timezone setting
+        with st.expander("⚙️ Settings", expanded=False):
+            current_tz = st.session_state.get("timezone", DEFAULT_TIMEZONE)
+            tz_index = TIMEZONE_OPTIONS.index(current_tz) if current_tz in TIMEZONE_OPTIONS else 0
+            selected_tz = st.selectbox(
+                "Timezone",
+                options=TIMEZONE_OPTIONS,
+                index=tz_index,
+                key="tz_select"
+            )
+            if selected_tz != current_tz:
+                save_user_timezone(supabase, username, selected_tz)
+                st.rerun()
 
         # Remove habit (collapsible)
         with st.expander("🗑️ Remove Habit", expanded=False):
